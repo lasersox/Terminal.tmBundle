@@ -22,121 +22,80 @@ module TextMate; module Terminal; class << self
 
   def start_with(*args, &block)
 
-    io_serv = WebSocketServer.new(:accepted_domains => ["*"], :port => 0)
+    io_serv = WebSocketServer.new(:accepted_domains => ["*"], :port => 8080)
     port = io_serv.tcp_server.addr[1]
 
-    $stderr.write("serving on port #{port}")
-    
-    if $stdout.tty?
-      wait(io_serv, *args, &block)
-    else
-      pid = fork do
+    Thread.abort_on_exception = true
 
-        $stdin.reopen("/dev/null")
-        $stdout.reopen("/dev/null")
-        $stderr.reopen("/dev/null")
+    rd, wr = ::IO.pipe
+    rd.sync = true
+    wr.sync = true 
 
-        wait(io_serv, *args, &block)
-
+    Thread.new do
+      io_serv.run do |ws|
+        ws.handshake
+        while data = ws.receive
+          wr.write data
+        end
       end
-      Process.detach(pid)
     end
-
     puts <<-HTML
-
     <html>
     <head>
       <script src='http://ajax.googleapis.com/ajax/libs/jquery/1.3.2/jquery.min.js'></script>
-      <script src='file://#{e_url(ENV["TM_BUNDLE_SUPPORT"])}/vt100.js'></script>
       <script type="text/javascript">
-        $(document).ready(function() {
-
-          var vt = new VT100(80,30,'term');
-          vt.noecho();
-
-          var ws = new WebSocket("ws://localhost:#{port}");          
-
-          getcha_ = function(ch, vt){
+        var ws = new WebSocket("ws://localhost:#{port}");          
+        ws.onerror = function() { alert(evt.data); }
+        ws.onopen = function() {
+          $(document).keypress(function(e) {
+            event.preventDefault();
+            ch = String.fromCharCode(e.charCode);
+            //if (ch == '\\r') { ch = '\\n'; }
             ws.send(ch);
-            vt.getch(getcha_);
             return false;
-          };
-
-          ws.onmessage = function(evt) {
-            vt.write(evt.data);
-            return false;
-          };
-
-          ws.onclose = function() {
-            vt.curs_set(0, false);
-            vt.write('\\n[Process completed]')
-            vt.refresh();
-          };
-          ws.onopen = function() {
-            vt.curs_set(1, true);
-            vt.getch(getcha_); };
-            vt.refresh();
-        });
+          });
+        }
       </script>
     </head>
-    <body style="background: black;">
+    <body style="background: black; color: white;">
     <pre id="term">
-    </pre>
-    </body>
-    </html>
     HTML
+    wait(rd, *args, &block)
   end
   
   private
-  def wait(io_serv, *args, &block)
-    Thread.abort_on_exception = true
-    io_serv.run do |ws|
-
-      at_exit { exit! }
-      ws.handshake
-
-      rd, wr = ::IO.pipe
-      wr.sync = true
-      rd.sync = true
+  def wait(io_rd, *args, &block)
+    PTY.spawn(args.join(" ")) do |pty_rd, pty_wr, pid|
+      pty_rd.sync = true
+      pty_wr.sync = true
 
       Thread.new do
         begin
-          puts 'reading'
-          while byte = ws.receive
-            next if byte == '\r'
-            wr.write byte
+          while data = io_rd.readchar.chr
+            pty_wr.write data
           end
-        rescue IOError         
+        rescue IOError
         ensure
-          wr.close
+          io_rd.close
         end
       end
 
-      ENV['TM_PTY_ARGS'] = args.join(" ")
-      PTY.spawn(args.join(" ")) do |proc_rd, proc_wr, pid|
-        
-        Thread.new do
-          while byte = rd.readchar.chr
-            proc_wr.write byte
-          end
+      begin
+        while data = pty_rd.readchar.chr
+          $stdout.write data
         end
-        
-        begin
-          while byte = proc_rd.readchar.chr do
-            ws.send(byte)
-          end
-        rescue EOFError
-        ensure
-          ws.close
-        end
-        
+      rescue EOFError
       end
-      exit
+
+      Process.wait pid
+      $stdout.puts '[Process completed]'
     end
+
+    exit
   end
 
 end end end
 
 if __FILE__ == $0
-  TextMate::Terminal.start_with("/usr/bin/zsh")
+  TextMate::Terminal.start_with("read x; echo hello $x '\\n';")
 end

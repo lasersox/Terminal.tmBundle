@@ -7,7 +7,7 @@
 // 2007-08-12	- refresh():
 //		  - factor out colour code to html_colours_()
 //		  - fix handling of A_REVERSE | A_DIM
-//		  - simplify initial <br> output code
+//		  - simplify initial <br /> output code
 //		  - fix underlining colour
 //		- fix attron() not to turn off attributes
 //		- decouple A_STANDOUT and A_BOLD
@@ -16,7 +16,7 @@
 // 2007-08-05	- Opera compat fixes for onkeypress
 // 2007-07-30	- IE compat fixes:
 //		  - change key handling code
-//		  - add <br>...<br>&nbsp; so that 1st and last lines align
+//		  - add <br />...<br />&nbsp; so that 1st and last lines align
 // 2007-07-28	- change wrapping behaviour -- writing at the right edge no
 //		  longer causes the cursor to immediately wrap around
 //		- add <b>...</b> to output to make A_STANDOUT stand out more
@@ -39,18 +39,16 @@
 //			otherwise the current attributes are used.
 //	addstr(stuff)	Writes out the string `stuff' using the current
 //			attributes.
-//	attroff(a)	Turns off any current attributes given in `a'.
-//	attron(a)	Turns on any attributes given in `a'.
-//	attrset(a)	Sets the current attributes to `a'.
-//	bkgdset(a)	Sets the background attributes to `a'.
+//	attroff(mode)	Turns off any current options given in mode.
+//	attron(mode)	Turns on any options given in mode.
+//	attrset(mode)	Sets the current options to mode.
+//	bkgdset(attr)	Sets the background attributes to attr.
 //	clear()		Clears the terminal using the background attributes,
 //			and homes the cursor.
 //	clrtobol()	Clears the portion of the terminal from the cursor
 //			to the bottom.
 //	clrtoeol()	Clears the portion of the current line after the
 //			cursor.
-//	COLOR_PAIR(pn)	Converts a colour pair number `pn' into an
-//			attribute.
 //	curs_set(vis [, grab])
 //			If `vis' is 0, makes the cursor invisible; otherwise
 //			make it visible. If `grab' is given and true, starts
@@ -68,12 +66,6 @@
 //			(`y') and column (`x') of the cursor.
 //	move(r, c)	Moves the cursor to row `r', column `c'.
 //	noecho()	Stops automatically echoing key strokes.
-//	pair_content(pn)
-//			Returns an associative array with the foreground
-//			(`f') and background (`b') colour numbers for the
-//			colour pair `pn'.
-//	PAIR_NUMBER(a)	Returns the colour pair number in the attributes
-//			`a'.
 //	refresh()	Updates the display.
 //	scroll()	Scrolls the terminal up one line.
 //	standend()	Same as `attrset(VT100.A_NORMAL)'.
@@ -83,30 +75,48 @@
 //			interpreted and acted on.
 
 // constructor
-function VT100(wd, ht, scr_id)
+function VT100(wd, ht, scr_id, max_scroll_lines, fg, bg)
 {
+	if (!max_scroll_lines) {
+		max_scroll_lines = 1000;
+	}
+	if (typeof(fg) == 'undefined') {
+		fg = VT100.COLOR_WHITE;
+	}
+	if (typeof(bg) == 'undefined') {
+		bg = VT100.COLOR_BLACK;
+	}
+
 	var r;
 	var c;
 	var scr = document.getElementById(scr_id);
 	this.wd_ = wd;
 	this.ht_ = ht;
-	this.c_attr_ = this.bkgd_ = this.COLOR_PAIR(0) | VT100.A_NORMAL;
-	this.color_pair_ = new Array(VT100.COLOR_PAIRS);
-	this.color_pair_[0] = { f: VT100.COLOR_WHITE, b: VT100.COLOR_BLACK };
+	// Keep up to max_scroll_lines of scrollback history.
+	this.max_ht_ = max_scroll_lines;
+	this._set_colors(fg, bg);
 	this.text_ = new Array(ht);
 	this.attr_ = new Array(ht);
+	this.redraw_ = new Array(ht);
+	this.scroll_region_ = [0, ht-1];
+	this.start_row_id = 0;
+	this.num_rows_ = ht;
 	for (r = 0; r < ht; ++r) {
 		this.text_[r] = new Array(wd);
 		this.attr_[r] = new Array(wd);
+		this.redraw_[r] = 1;
 	}
 	this.scr_ = scr;
 	this.cursor_vis_ = true;
+	this.cursor_key_mode_ = VT100.CK_CURSOR;
 	this.grab_events_ = false;
 	this.getch_isr_ = undefined;
 	this.key_buf_ = [];
 	this.echo_ = true;
 	this.esc_state_ = 0;
-	this.clear();
+	this.log_level_ = VT100.WARN;
+
+	this.clear_all();
 	this.refresh();
 }
 
@@ -121,6 +131,9 @@ VT100.COLOR_YELLOW = 6;
 VT100.COLOR_WHITE = 7;
 VT100.COLOR_PAIRS = 256;
 VT100.COLORS = 8;
+// Cursor key modes.
+VT100.CK_CURSOR = 0;
+VT100.CK_APPLICATION = 1;
 // public constants -- attributes
 VT100.A_NORMAL = 0;
 VT100.A_UNDERLINE = 1;
@@ -139,14 +152,20 @@ VT100.ATTR_FLAGS_ = VT100.A_UNDERLINE | VT100.A_REVERSE | VT100.A_BLINK |
 VT100.COLOR_SHIFT_ = 6;
 VT100.browser_ie_ = (navigator.appName.indexOf("Microsoft") != -1);
 VT100.browser_opera_ = (navigator.appName.indexOf("Opera") != -1);
+// logging levels
+VT100.WARN = 1;
+VT100.INFO = 2;
+VT100.DEBUG = 3;
 // class variables
 VT100.the_vt_ = undefined;
 
 // class methods
 
 // this is actually an event handler
-VT100.handle_onkeypress_ = function(e)
+VT100.handle_onkeypress_ = function VT100_handle_onkeypress(event)
 {
+	//dump("event target: " + event.target.id + "\n");
+	//dump("event originalTarget: " + event.originalTarget.id + "\n");
 	var vt = VT100.the_vt_, ch;
 	if (vt === undefined)
 		return true;
@@ -158,25 +177,78 @@ VT100.handle_onkeypress_ = function(e)
 			return true;
 		ch = String.fromCharCode(ch);
 	} else {
-		ch = e.charCode;
+		ch = event.charCode;
+		//dump("ch: " + ch + "\n");
+		//dump("ctrl?: " + event.ctrlKey + "\n");
+		vt.debug("onkeypress:: keyCode: " + event.keyCode + ", ch: " + event.charCode);
 		if (ch) {
 			if (ch > 255)
 				return true;
-			ch = String.fromCharCode(ch);
-			if (ch == '\r')
-				ch = '\n';
-		} else
-			switch (e.keyCode) {
-			    case e.DOM_VK_BACK_SPACE:
-				ch = '\b';	break;
-			    case e.DOM_VK_TAB:
-				ch = '\t';	break;
-			    case e.DOM_VK_RETURN:
-			    case e.DOM_VK_ENTER:
-				ch = '\n';	break;
+			if (event.ctrlKey && event.shiftKey) {
+				// Don't send the copy/paste commands.
+				var charStr = String.fromCharCode(ch);
+				if (charStr == 'C' || charStr == 'V') {
+					return false;
+				}
+			}
+			if (event.ctrlKey) {
+				ch = String.fromCharCode(ch - 96);
+			} else {
+				ch = String.fromCharCode(ch);
+				if (ch == '\r')
+					ch = '\n';
+			}
+		} else {
+			switch (event.keyCode) {
+			    case event.DOM_VK_BACK_SPACE:
+				ch = '\b';
+				break;
+			    case event.DOM_VK_TAB:
+				ch = '\t';
+				break;
+			    case event.DOM_VK_RETURN:
+			    case event.DOM_VK_ENTER:
+				ch = '\r';
+				break;
+			    case event.DOM_VK_UP:
+				if (this.cursor_key_mode_ == VT100.CK_CURSOR)
+					ch = '\x1b[A';
+				else
+					ch = '\x1bOA';
+				break;
+			    case event.DOM_VK_DOWN:
+				if (this.cursor_key_mode_ == VT100.CK_CURSOR)
+					ch = '\x1b[B';
+				else
+					ch = '\x1bOB';
+				break;
+			    case event.DOM_VK_RIGHT:
+				if (this.cursor_key_mode_ == VT100.CK_CURSOR)
+					ch = '\x1b[C';
+				else
+					ch = '\x1bOC';
+				break;
+			    case event.DOM_VK_LEFT:
+				if (this.cursor_key_mode_ == VT100.CK_CURSOR)
+					ch = '\x1b[D';
+				else
+					ch = '\x1bOD';
+				break;
+			    case event.DOM_VK_DELETE:
+				ch = '\x1b[3~';
+				break;
+			    case event.DOM_VK_HOME:
+				ch = '\x1b[H';
+				break;
+			    case event.DOM_VK_ESCAPE:
+				ch = '\x1b';
+				break;
 			    default:
 				return true;
 			}
+		}
+		// Stop the event from doing anything else.
+		event.preventDefault();
 	}
 	vt.key_buf_.push(ch);
 	setTimeout(VT100.go_getch_, 0);
@@ -184,7 +256,7 @@ VT100.handle_onkeypress_ = function(e)
 }
 
 // this is actually an event handler
-VT100.handle_onkeydown_ = function()
+VT100.handle_onkeydown_ = function VT100_handle_onkeydown()
 {
 	var vt = VT100.the_vt_, ch;
 	switch (event.keyCode) {
@@ -198,7 +270,7 @@ VT100.handle_onkeydown_ = function()
 	return false;
 }
 
-VT100.go_getch_ = function()
+VT100.go_getch_ = function VT100_go_getch()
 {
 	var vt = VT100.the_vt_;
 	if (vt === undefined)
@@ -219,7 +291,7 @@ VT100.go_getch_ = function()
 
 // object methods
 
-VT100.prototype.may_scroll_ = function()
+VT100.prototype.may_scroll_ = function VT100_may_scroll_()
 {
 	var ht = this.ht_, cr = this.row_;
 	while (cr >= ht) {
@@ -229,18 +301,23 @@ VT100.prototype.may_scroll_ = function()
 	this.row_ = cr;
 }
 
-VT100.prototype.html_colours_ = function(attr)
+VT100.prototype.html_colours_ = function VT100_html_colours_(attr)
 {
-	var pair, fg, bg, co0, co1;
-	pair = this.pair_content(this.PAIR_NUMBER(attr));
-	fg = pair.f;
-	bg = pair.b;
-	switch (attr & (VT100.A_REVERSE | VT100.A_DIM | VT100.A_BOLD)) {
+	var fg, bg, co0, co1;
+	fg = attr.fg;
+	bg = attr.bg;
+	switch (attr.mode & (VT100.A_REVERSE | VT100.A_DIM | VT100.A_BOLD)) {
 	    case 0:
 	    case VT100.A_DIM | VT100.A_BOLD:
-		co0 = '00';  co1 = 'c0';  break;
+		co0 = '00';
+		if (bg == VT100.COLOR_WHITE)
+			co1 = 'ff';
+		else
+			co1 = 'c0';
+		break;
 	    case VT100.A_BOLD:
-		co0 = '00';  co1 = 'ff';  break;
+		co0 = '00';  co1 = 'ff';
+		break;
 	    case VT100.A_DIM:
 		if (fg == VT100.COLOR_BLACK)
 			co0 = '40';
@@ -250,9 +327,11 @@ VT100.prototype.html_colours_ = function(attr)
 		break;
 	    case VT100.A_REVERSE:
 	    case VT100.A_REVERSE | VT100.A_DIM | VT100.A_BOLD:
-		co0 = 'c0';  co1 = '40';  break;
+		co0 = 'c0';  co1 = '40';
+		break;
 	    case VT100.A_REVERSE | VT100.A_BOLD:
-		co0 = 'c0';  co1 = '00';  break;
+		co0 = 'c0';  co1 = '00';
+		break;
 	    default:
 		if (fg == VT100.COLOR_BLACK)
 			co0 = '80';
@@ -270,9 +349,12 @@ VT100.prototype.html_colours_ = function(attr)
 	    };
 }
 
-VT100.prototype.addch = function(ch, attr)
+VT100.prototype.addch = function VT100_addch(ch, attr)
 {
 	var cc = this.col_;
+	this.debug("addch:: ch: " + ch + ", attr: " + attr);
+	this.redraw_[this.row_] = 1;
+
 	switch (ch) {
 	    case '\b':
 		if (cc != 0)
@@ -297,13 +379,14 @@ VT100.prototype.addch = function(ch, attr)
 		}
 		break;
 	    default:
-		if (attr === undefined)
+		if (attr === undefined) {
 			attr = this.c_attr_;
+		}
 		if (cc >= this.wd_) {
 			++this.row_;
 			cc = 0;
+			this.may_scroll_();
 		}
-		this.may_scroll_();
 		this.text_[this.row_][cc] = ch;
 		this.attr_[this.row_][cc] = attr;
 		++cc;
@@ -311,27 +394,56 @@ VT100.prototype.addch = function(ch, attr)
 	this.col_ = cc;
 }
 
-VT100.prototype.addstr = function(stuff)
+VT100.prototype.addstr = function VT100_addstr(stuff)
 {
 	for (var i = 0; i < stuff.length; ++i)
 		this.addch(stuff.charAt(i));
 }
 
+VT100.prototype._cloneAttr = function VT100_cloneAttr(a)
+{
+	return {
+		mode: a.mode,
+		fg: a.fg,
+		bg: a.bg
+	};
+}
+
 VT100.prototype.attroff = function(a)
 {
+	//dump("attroff: " + a + "\n");
 	a &= VT100.ATTR_FLAGS_;
-	this.c_attr_ &= ~a;
+	this.c_attr_ = this._cloneAttr(this.c_attr_);
+	this.c_attr_.mode &= ~a;
 }
 
 VT100.prototype.attron = function(a)
 {
+	//dump("attron: " + a + "\n");
 	a &= VT100.ATTR_FLAGS_;
-	this.c_attr_ |= a;
+	this.c_attr_ = this._cloneAttr(this.c_attr_);
+	this.c_attr_.mode |= a;
 }
 
 VT100.prototype.attrset = function(a)
 {
-	this.c_attr_ = a;
+	//dump("attrset: " + a + "\n");
+	this.c_attr_ = this._cloneAttr(this.c_attr_);
+	this.c_attr_.mode = a;
+}
+
+VT100.prototype.fgset = function(fg)
+{
+	//dump("fgset: " + fg + "\n");
+	this.c_attr_ = this._cloneAttr(this.c_attr_);
+	this.c_attr_.fg = fg;
+}
+
+VT100.prototype.bgset = function(bg)
+{
+	//dump("bgset: " + bg + "\n");
+	this.c_attr_ = this._cloneAttr(this.c_attr_);
+	this.c_attr_.bg = bg;
 }
 
 VT100.prototype.bkgdset = function(a)
@@ -339,19 +451,45 @@ VT100.prototype.bkgdset = function(a)
 	this.bkgd_ = a;
 }
 
-VT100.prototype.clear = function()
+VT100.prototype.clear_all = function VT100_clear_all()
 {
+	this.info("clear_all");
+	this.clear();
+
+	var elem = this.scr_;
+	var firstChild = elem.firstChild;
+	while (firstChild) {
+		elem.removeChild(firstChild);
+		firstChild = elem.firstChild;
+	}
+	this.num_rows_ = this.ht_;
+	this.start_row_id = 0;
+
+	// Create the content element which will contain the terminal output.
+	// The html rows are added as a group of rows, making it easy to later
+	// delete a bunch of rows in one go when they have scrolled off the end.
+	var group_element = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+	elem.appendChild(group_element);
+	this.group_element_ = group_element;
+}
+
+VT100.prototype.clear = function VT100_clear()
+{
+	this.info("clear");
 	this.row_ = this.col_ = 0;
+	var r, c;
 	for (r = 0; r < this.ht_; ++r) {
 		for (c = 0; c < this.wd_; ++c) {
 			this.text_[r][c] = ' ';
 			this.attr_[r][c] = this.bkgd_;
 		}
+		this.redraw_[r] = 1;
 	}
 }
 
-VT100.prototype.clrtobot = function()
+VT100.prototype.clrtobot = function VT100_clrtobot()
 {
+	this.info("clrtobot, row: " + this.row_);
 	var ht = this.ht_;
 	var wd = this.wd_;
 	this.clrtoeol();
@@ -360,11 +498,13 @@ VT100.prototype.clrtobot = function()
 			this.text_[r][c] = ' ';
 			this.attr_[r][c] = this.bkgd_;
 		}
+		this.redraw_[r] = 1;
 	}
 }
 
-VT100.prototype.clrtoeol = function()
+VT100.prototype.clrtoeol = function VT100_clrtoeol()
 {
+	this.info("clrtoeol, col: " + this.col_);
 	var r = this.row_;
 	if (r >= this.ht_)
 		return;
@@ -372,28 +512,39 @@ VT100.prototype.clrtoeol = function()
 		this.text_[r][c] = ' ';
 		this.attr_[r][c] = this.bkgd_;
 	}
+	this.redraw_[r] = 1;
 }
 
-VT100.prototype.COLOR_PAIR = function(pn)
+VT100.prototype.clearpos = function VT100_clearpos(row, col)
 {
-	return pn << VT100.COLOR_SHIFT_;
+	this.info("clearpos (" + row + ", " + col + ")");
+	if (row < 0 || row >= this.ht_)
+		return;
+	if (col < 0 || col >= this.wd_)
+		return;
+	this.text_[row][col] = ' ';
+	this.attr_[row][col] = this.bkgd_;
+	this.redraw_[row] = 1;
 }
 
-VT100.prototype.curs_set = function(vis, grab)
+VT100.prototype.curs_set = function(vis, grab, eventist)
 {
+	this.info("curs_set:: vis: " + vis + ", grab: " + grab);
 	if (vis !== undefined)
 		this.cursor_vis_ = (vis > 0);
+	if (eventist === undefined)
+		eventist = this.scr_;
 	if (grab === true || grab === false) {
 		if (grab === this.grab_events_)
 			return;
 		if (grab) {
 			this.grab_events_ = true;
 			VT100.the_vt_ = this;
-			document.onkeypress = VT100.handle_onkeypress_;
+			eventist.addEventListener("keypress", VT100.handle_onkeypress_, false);
 			if (VT100.browser_ie_)
 				document.onkeydown = VT100.handle_onkeydown_;
 		} else {
-			document.onkeypress = undefined;
+			eventist.removeEventListener("keypress", VT100.handle_onkeypress_, false);
 			if (VT100.browser_ie_)
 				document.onkeydown = VT100.handle_onkeydown_;
 			this.grab_events_ = false;
@@ -404,6 +555,7 @@ VT100.prototype.curs_set = function(vis, grab)
 
 VT100.prototype.echo = function()
 {
+	this.info("echo on");
 	this.echo_ = true;
 }
 
@@ -411,6 +563,7 @@ VT100.prototype.erase = VT100.prototype.clear;
 
 VT100.prototype.getch = function(isr)
 {
+	this.info("getch");
 	this.refresh();
 	this.getch_isr_ = isr;
 	setTimeout(VT100.go_getch_, 0);
@@ -428,6 +581,8 @@ VT100.prototype.getyx = function()
 
 VT100.prototype.move = function(r, c)
 {
+	this.info("move: (" + r + ", " + c + ")");
+	this.redraw_[this.row_] = 1;
 	if (r < 0)
 		r = 0;
 	else if (r >= this.ht_)
@@ -438,110 +593,248 @@ VT100.prototype.move = function(r, c)
 		c = this.wd_ - 1;
 	this.row_ = r;
 	this.col_ = c;
+	this.redraw_[this.row_] = 1;
 }
 
 VT100.prototype.noecho = function()
 {
+	this.info("echo off");
 	this.echo_ = false;
 }
 
-VT100.prototype.pair_content = function(pn)
+VT100.prototype.refresh = function VT100_refresh()
 {
-	return this.color_pair_[pn];
-}
-
-VT100.prototype.PAIR_NUMBER = function(at)
-{
-	return at >> VT100.COLOR_SHIFT_;
-}
-
-VT100.prototype.refresh = function()
-{
-	var r, c, stuff = "", end_tag = "", at = -1, n_at, ch,
-	    pair, cr, cc, ht, wd, cv;
-	ht = this.ht_;
-	wd = this.wd_;
-	cr = this.row_;
-	cc = this.col_;
-	cv = this.cursor_vis_;
+	//this.info("refresh");
+	var r, c, html = "", row_html, start_tag = "", end_tag = "",
+	    at = -1, n_at, ch, pair, added_end_tag;
+	var ht = this.ht_;
+	var wd = this.wd_;
+	var cr = this.row_;
+	var cc = this.col_;
+	var cv = this.cursor_vis_;
 	if (cc >= wd)
 		cc = wd - 1;
+	var base_row_id = this.num_rows_ - ht;
+	var id;
+
+	// XXX: Remove older rows if past max_ht_ rows.
+	var num_rows = this.num_rows_ - this.start_row_id;
+	if (num_rows >= (this.max_ht_ + 100)) {
+		// Remove one group of rows (i.e. a 100 rows).
+		this.scr_.removeChild(this.scr_.firstChild);
+		this.start_row_id += 100;
+	}
+
 	for (r = 0; r < ht; ++r) {
-		stuff += '<br>';
+		if (!this.redraw_[r]) {
+			continue;
+		}
+		//dump("Redrawing row: " + r + "\n");
+		this.redraw_[r] = 0;
+		id = base_row_id + r;
+		row_html = "";
 		for (c = 0; c < wd; ++c) {
+			added_end_tag = false;
 			n_at = this.attr_[r][c];
-			if (cv && r == cr && c == cc)
-				n_at ^= VT100.A_REVERSE;
-			if (n_at != at) {
-				stuff += end_tag;
+			if (cv && r == cr && c == cc) {
+				// Draw the cursor here.
+				n_at = this._cloneAttr(n_at);
+				n_at.mode ^= VT100.A_REVERSE;
+			}
+			// If the attributes changed, make a new span.
+			if (n_at.mode != at.mode || n_at.fg != at.fg || n_at.bg != at.bg) {
+				if (c > 0) {
+					row_html += end_tag;
+				}
+				start_tag = "";
 				end_tag = "";
-				if (n_at & VT100.A_BLINK) {
-					stuff += "<blink>";
+				if (n_at.mode & VT100.A_BLINK) {
+					start_tag = "<blink>";
 					end_tag = "</blink>" + end_tag;
 				}
-				if (n_at & VT100.A_STANDOUT)
-					n_at |= VT100.A_BOLD;
+				//if (n_at.mode & VT100.A_STANDOUT)
+				//	n_at.mode |= VT100.A_BOLD;
 				pair = this.html_colours_(n_at);
-				stuff += '<span style="color:' + pair.f +
-				    ';background-color:' + pair.b;
-				if (n_at & VT100.A_UNDERLINE)
-					stuff += ';text-decoration:underline';
-				stuff += ';">';
+				start_tag += '<span style="color:' + pair.f +
+				             ';background-color:' + pair.b;
+				if (n_at.mode & VT100.A_BOLD)
+					start_tag += ';font-weight: bolder';
+				if (n_at.mode & VT100.A_UNDERLINE)
+					start_tag += ';text-decoration:underline';
+				start_tag += ';">';
+				row_html += start_tag;
 				end_tag = "</span>" + end_tag;
 				at = n_at;
+				added_end_tag = true;
+			} else if (c == 0) {
+				row_html += start_tag;
 			}
 			ch = this.text_[r][c];
 			switch (ch) {
 			    case '&':
-				stuff += '&amp;';	break;
+				row_html += '&amp;';	break;
 			    case '<':
-				stuff += '&lt;';	break;
+				row_html += '&lt;';	break;
 			    case '>':
-				stuff += '&gt;';	break;
+				row_html += '&gt;';	break;
 			    case ' ':
-				stuff += '&nbsp;';	break;
+				//row_html += '&nbsp;';	break;
+				row_html += ' ';	break;
 			    default:
-				stuff += ch;
+				row_html += ch;
 			}
 		}
+		if (!added_end_tag)
+			row_html += end_tag;
+		var div_element = document.getElementById(id);
+		if (!div_element) {
+			// Create a new div to append to.
+			div_element = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+			div_element.setAttribute("id", id);
+			if ((id % 100) == 99) {
+				// Create a new group of rows.
+				this.group_element_ = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+				this.scr_.appendChild(this.group_element_);
+			}
+			this.group_element_.appendChild(div_element);
+		}
+		div_element.innerHTML = row_html;
+		//dump("adding row html: " + row_html + "\n");
 	}
-	this.scr_.innerHTML = "&nbsp;<b>" + stuff + end_tag + "</b><br>&nbsp;";
+}
+
+VT100.prototype.set_max_scroll_lines = function(max_lines)
+{
+	this.max_ht_ = max_lines;
+}
+
+VT100.prototype._set_colors = function(fg_color, bg_color)
+{
+	this.bkgd_ = {
+			mode: VT100.A_NORMAL,
+			fg: fg_color,
+			bg: bg_color
+		     };
+	this.c_attr_ = {
+			mode: VT100.A_NORMAL,
+			fg: fg_color,
+			bg: bg_color
+		     };
+}
+
+VT100.prototype.set_fg_color = function(fg_color)
+{
+	this._set_colors(fg_color, this.bkgd_.bg);
+}
+
+VT100.prototype.set_bg_color = function(bg_color)
+{
+	this._set_colors(this.bkgd_.fg, bg_color);
+}
+
+VT100.prototype.set_scrolling_region = function(start, end)
+{
+	start = Math.max(0, Math.min(start, this.ht_ - 1));
+	end   = Math.max(0, Math.min(end,   this.ht_ - 1));
+	this.scroll_region_ = [start, end];
 }
 
 VT100.prototype.scroll = function()
 {
-	var n_text = this.text_[0], n_attr = this.attr_[0],
-	    ht = this.ht_, wd = this.wd_;
-	for (var r = 1; r < ht; ++r) {
+	var bottom = this.scroll_region_[0];
+	var top = this.scroll_region_[1];
+	var roll_rows = (this.row_ == (this.ht_ - 1));
+	var n_text = this.text_[bottom], n_attr = this.attr_[bottom],
+	    wd = this.wd_;
+	for (var r = bottom+1; r <= top; ++r) {
 		this.text_[r - 1] = this.text_[r];
 		this.attr_[r - 1] = this.attr_[r];
+		this.redraw_[r - 1] = !roll_rows || this.redraw_[r];
 	}
-	this.text_[ht - 1] = n_text;
-	this.attr_[ht - 1] = n_attr;
+	this.text_[top] = n_text;
+	this.attr_[top] = n_attr;
+	this.redraw_[top] = 1;
 	for (var c = 0; c < wd; ++c) {
 		n_text[c] = ' ';
 		n_attr[c] = this.bkgd_;
 	}
+	if (roll_rows)
+		this.num_rows_ += 1;
+}
+
+VT100.prototype.scrollup = function()
+{
+	var bottom = this.scroll_region_[0];
+	var top = this.scroll_region_[1];
+	var wd = this.wd_;
+	var n_text = this.text_[top], n_attr = this.attr_[top];
+	for (var r = top; r > bottom; r--) {
+		this.text_[r] = this.text_[r - 1];
+		this.attr_[r] = this.attr_[r - 1];
+		this.redraw_[r] = 1;
+	}
+	this.text_[bottom] = n_text;
+	this.attr_[bottom] = n_attr;
+	for (var c = 0; c < wd; ++c) {
+		n_text[c] = ' ';
+		n_attr[c] = this.bkgd_;
+	}
+	this.redraw_[bottom] = 1;
 }
 
 VT100.prototype.standend = function()
 {
+	//this.info("standend");
 	this.attrset(0);
 }
 
 VT100.prototype.standout = function()
 {
+	//this.info("standout");
 	this.attron(VT100.A_STANDOUT);
 }
 
-VT100.prototype.write = function(stuff)
+VT100.prototype.write = function VT100_write(stuff)
 {
-	var ch, x, r, c, i, j, yx, myx;
+	var ch, x, r, c, i, j, cv;
+	var ht = this.ht_;
+	var codes = "";
+	var prev_esc_state_ = 0;
+	var undrawn_rows;
+	var ht_minus1 = ht - 1;
+	var start_row_offset = ht - this.row_;
+	var start_num_rows = this.num_rows_;
 	for (i = 0; i < stuff.length; ++i) {
+		// Refresh when there are undrawn rows that are about to be
+		// scrolled off the screen, need to draw these rows before
+		// the scrolling occurs, otherwise they will never be visible.
+		undrawn_rows = (this.num_rows_ - start_num_rows) + start_row_offset;
+		if (undrawn_rows >= ht) {
+			cv = this.cursor_vis_;
+			this.cursor_vis_ = false;
+			this.refresh();
+			this.cursor_vis_ = cv;
+			start_row_offset = ht - this.row_;
+			start_num_rows = this.num_rows_;
+			//dump("refreshed\n");
+		}
 		ch = stuff.charAt(i);
+
+		if (this.log_level_ >= VT100.INFO) {
+			if (ch == '\x1b') {
+				code = "ESC";
+			} else {
+				code = this.escape(ch);
+			}
+			this.debug("  write:: ch: " + ch.charCodeAt(0) + ", '" + code + "'");
+			codes += code;
+		}
+
 		switch (ch) {
 		    case '\x00':
 		    case '\x7f':
+		    case '\x07':  /* bell, ignore it */
+			this.debug("          ignoring bell character: " + ch);
 			continue;
 		    case '\a':
 		    case '\b':
@@ -552,25 +845,29 @@ VT100.prototype.write = function(stuff)
 		    case '\n':
 		    case '\v':
 		    case '\f': // what a mess
-			yx = this.getyx();
-			myx = this.getmaxyx();
-			if (yx.y >= myx.y) {
+			r = this.row_;
+			if (r >= this.scroll_region_[1]) {
 				this.scroll();
-				this.move(myx.y, 0);
-			} else
-				this.move(yx.y + 1, 0);
+				this.move(this.scroll_region_[1], 0);
+			} else {
+				this.move(r + 1, 0);
+			}
 			continue;
 		    case '\x18':
 		    case '\x1a':
 			this.esc_state_ = 0;
+			this.debug("          set escape state: 0");
 			continue;
 		    case '\x1b':
 			this.esc_state_ = 1;
+			this.debug("          set escape state: 1");
 			continue;
 		    case '\x9b':
 			this.esc_state_ = 2;
+			this.debug("          set escape state: 2");
 			continue;
 		}
+		prev_esc_state_ = this.esc_state_;
 		// not a recognized control character
 		switch (this.esc_state_) {
 		    case 0: // not in escape sequence
@@ -580,11 +877,70 @@ VT100.prototype.write = function(stuff)
 			switch (ch) {
 			    case '[':
 				this.esc_state_ = 2;
+				this.debug("          set escape state: 2");
+				break;
+			    case '=':
+				/* Set keypade mode (ignored) */
+				this.info("          set keypade mode: ignored");
+				this.esc_state_ = 0;
+				break;
+			    case '>':
+				/* Reset keypade mode (ignored) */
+				this.info("          reset keypade mode: ignored");
+				this.esc_state_ = 0;
+				break;
+			    case 'H':
+				/* Set tab at cursor column (ignored) */
+				this.info("          set tab cursor column: ignored");
+				this.esc_state_ = 0;
+				break;
+			    case 'D':
+				/* Scroll display down one line */
+				this.scroll();
+				this.esc_state_ = 0;
+				break;
+			    case 'D':
+				/* Scroll display down one line */
+				this.scroll();
+				this.esc_state_ = 0;
+			    case 'M':
+				/* Scroll display up one line */
+				this.scrollup();
+				this.esc_state_ = 0;
 				break;
 			}
 			break;
 		    case 2: // just saw CSI
+			switch (ch) {
+			    case 'K':
+				/* Erase in Line */
+				this.esc_state_ = 0;
+				this.clrtoeol();
+				continue;
+			    case 'H':
+				/* Move to (0,0). */
+				this.esc_state_ = 0;
+				this.move(0, 0);
+				continue;
+			    case 'J':
+				/* Clear to the bottom. */
+				this.esc_state_ = 0;
+				this.clrtobot();
+				continue;
+			    case 'r':
+				/* Reset scrolling region. */
+				this.esc_state_ = 0;
+				this.set_scrolling_region(0, this.ht_ - 1);
+				continue;
+			    case '?':
+				/* Special VT100 mode handling. */
+				this.esc_state_ = 5;
+				this.debug("          special vt100 mode");
+				continue;
+			}
+			// Drop through to next case.
 			this.csi_parms_ = [0];
+			//this.debug("          set escape state: 3");
 			this.esc_state_ = 3;
 		    case 3: // saw CSI and parameters
 			switch (ch) {
@@ -600,17 +956,38 @@ VT100.prototype.write = function(stuff)
 			    case '9':
 				x = this.csi_parms_.pop();
 				this.csi_parms_.push(x * 10 + ch * 1);
+				this.debug("    csi_parms_: " + this.csi_parms_);
 				continue;
 			    case ';':
 				if (this.csi_parms_.length < 17)
 					this.csi_parms_.push(0);
-			    case '?': // ?!?
 				continue;
 			}
 			this.esc_state_ = 0;
 			switch (ch) {
+			    case 'A':
+				// Cursor Up 		<ESC>[{COUNT}A
+				this.move(this.row_ - Math.max(1, this.csi_parms_[0]),
+					  this.col_);
+				break;
+			    case 'B':
+				// Cursor Down 		<ESC>[{COUNT}B
+				this.move(this.row_ + Math.max(1, this.csi_parms_[0]),
+					  this.col_);
+				break;
+			    case 'C':
+				// Cursor Forward 	<ESC>[{COUNT}C
+				this.move(this.row_,
+					  this.col_ + Math.max(1, this.csi_parms_[0]));
+				break;
+			    case 'D':
+				// Cursor Backward 	<ESC>[{COUNT}D
+				this.move(this.row_,
+					  this.col_ - Math.max(1, this.csi_parms_[0]));
+				break;
+			    case 'f':
 			    case 'H':
-				this.esc_state_ = 0;
+				// Cursor Home 		<ESC>[{ROW};{COLUMN}H
 				this.csi_parms_.push(0);
 				this.move(this.csi_parms_[0] - 1,
 					  this.csi_parms_[1] - 1);
@@ -631,19 +1008,174 @@ VT100.prototype.write = function(stuff)
 					switch (x) {
 					    case 0:
 						this.standend();
+						this.fgset(this.bkgd_.fg);
+						this.bgset(this.bkgd_.bg);
 						break;
 					    case 1:
 						this.attron(VT100.A_BOLD);
 						break;
+					    case 2:
+						this.attroff(VT100.A_BOLD);
+						break;
+					    case 4:
+						this.attron(VT100.A_UNDERLINE);
+						break;
+					    case 5:
+						this.attron(VT100.A_BLINK);
+						break;
+					    case 7:
+						this.attron(VT100.A_REVERSE);
+						break;
+					    case 8:
+						this.attron(VT100.A_INVIS);
+						break;
+					    case 30:
+						this.fgset(VT100.COLOR_BLACK);
+						break;
+					    case 31:
+						this.fgset(VT100.COLOR_RED);
+						break;
+					    case 32:
+						this.fgset(VT100.COLOR_GREEN);
+						break;
+					    case 33:
+						this.fgset(VT100.COLOR_YELLOW);
+						break;
+					    case 34:
+						this.fgset(VT100.COLOR_BLUE);
+						break;
+					    case 35:
+						this.fgset(VT100.COLOR_MAGENTA);
+						break;
+					    case 36:
+						this.fgset(VT100.COLOR_CYAN);
+						break;
+					    case 37:
+						this.fgset(VT100.COLOR_WHITE);
+						break;
+					    case 40:
+						this.bgset(VT100.COLOR_BLACK);
+						break;
+					    case 41:
+						this.bgset(VT100.COLOR_RED);
+						break;
+					    case 42:
+						this.bgset(VT100.COLOR_GREEN);
+						break;
+					    case 43:
+						this.bgset(VT100.COLOR_YELLOW);
+						break;
+					    case 44:
+						this.bgset(VT100.COLOR_BLUE);
+						break;
+					    case 45:
+						this.bgset(VT100.COLOR_MAGENTA);
+						break;
+					    case 46:
+						this.bgset(VT100.COLOR_CYAN);
+						break;
+					    case 47:
+						this.bgset(VT100.COLOR_WHITE);
+						break;
 					}
 				}
+				break;
+			    case 'r':
+				// 1,24r - set scrolling region
+				this.set_scrolling_region(this.csi_parms_[0] - 1,
+							  this.csi_parms_[1] - 1);
+				break;
 			    case '[':
+				this.debug("           set escape state: 4");
 				this.esc_state_ = 4;
+				break;
+			    case 'g':
+				// 0g: clear tab at cursor (ignored)
+				// 3g: clear all tabs (ignored)
+				if (this.csi_parms_[0] == 3)
+					this.clear_all();
+				break;
+			    default:
+				this.warn("        unknown command: " + ch);
+				this.csi_parms_ = [];
+				break;
 			}
 			break;
 		    case 4: // saw CSI [
 			this.esc_state_ = 0; // gobble char.
+			break;
+		    case 5: // Special mode handling, saw <ESC>[?
+			// Expect a number - the reset type
+			this.csi_parms_ = [ch];
+			this.esc_state_ = 6;
+			break;
+		    case 6: // Reset mode handling, saw <ESC>[?1
+			// Expect a letter - the mode target, example:
+			// <ESC>[?1h : Set cursor key mode to application
+			// <ESC>[?3h : Set number of columns to 132
+			// <ESC>[?4h : Set smooth scrolling
+			// <ESC>[?5h : Set reverse video on screen
+			// <ESC>[?6h : Set origin to relative
+			// <ESC>[?7h : Set auto-wrap mode
+			// <ESC>[?8h : Set auto-repeat mode
+			// <ESC>[?9h : Set interlacing mode
+			// <ESC>[?1l : Set cursor key mode to cursor
+			// <ESC>[?2l : Set VT52 (versus ANSI) compatible
+			// <ESC>[?3l : Set number of columns to 80
+			// <ESC>[?4l : Set jump scrolling
+			// <ESC>[?5l : Set normal video on screen
+			// <ESC>[?6l : Set origin to absolute
+			// <ESC>[?7l : Reset auto-wrap mode
+			// <ESC>[?8l : Reset auto-repeat mode
+			// <ESC>[?9l : Reset interlacing mode
+			// XXX: Ignored for now.
+			//dump("Saw reset mode: <ESC>[?" + this.csi_parms_[0] + ch + "\n");
+			var command = this.csi_parms_[0]  + ch;
+			if (command == '1h') {
+				this.cursor_key_mode_ = VT100.CK_APPLICATION;
+			} else if (command == '1l') {
+				this.cursor_key_mode_ = VT100.CK_CURSOR;
+			}
+			this.esc_state_ = 0;
+			//this.debug("          set escape state: 0");
+			break;
+		}
+		if ((prev_esc_state_ > 0 && this.esc_state_ == 0) ||
+		    (prev_esc_state_ == 0 && this.esc_state_ > 0)) {
+			this.info("codes: " + this.escape(codes));
+			codes = "";
 		}
 	}
 	this.refresh();
+}
+
+
+VT100.prototype.escape = function VT100_escape(message) {
+	var escape_codes = {
+		"\r": "\\r",
+		"\n": "\\n",
+		"\t": "\\t"
+	};
+	for (var prop in escape_codes) {
+		message = message.replace(prop, escape_codes[prop], "g");
+	}
+	return message;
+}
+
+VT100.prototype.debug = function VT100_debug(message) {
+	if (this.log_level_ >= VT100.DEBUG) {
+		dump(message + "\n");
+	}
+}
+
+VT100.prototype.info = function VT100_info(message) {
+	if (this.log_level_ >= VT100.INFO) {
+		dump(message + "\n");
+	}
+}
+
+VT100.prototype.warn = function VT100_warn(message) {
+	if (this.log_level_ >= VT100.WARN) {
+		dump(message + "\n");
+	}
 }

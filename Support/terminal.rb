@@ -49,19 +49,17 @@ module TextMate; module Terminal; class << self
       <script src='http://ajax.googleapis.com/ajax/libs/jquery/1.3.2/jquery.min.js'></script>
       <script src='file://#{e_url(ENV["TM_BUNDLE_SUPPORT"])}/vt100.js'></script>
       <script type="text/javascript">
-
-        var ws;
-        var vt;
         $(document).ready(function() {
 
-          vt = new VT100(80,30,'term');
+          var vt = new VT100(80,30,'term');
           vt.noecho();
 
-          ws = new WebSocket("ws://localhost:#{port}");          
+          var ws = new WebSocket("ws://localhost:#{port}");          
 
           getcha_ = function(ch, vt){
             ws.send(ch);
             vt.getch(getcha_);
+            return false;
           };
 
           ws.onmessage = function(evt) {
@@ -69,8 +67,15 @@ module TextMate; module Terminal; class << self
             return false;
           };
 
-          ws.onclose = function() { vt.curs_set(0, false); };
-          ws.onopen = function() { vt.curs_set(1, true); vt.getch(getcha_); };
+          ws.onclose = function() {
+            vt.curs_set(0, false);
+            vt.write('\\n[Process completed]')
+            vt.refresh();
+          };
+          ws.onopen = function() {
+            vt.curs_set(1, true);
+            vt.getch(getcha_); };
+            vt.refresh();
         });
       </script>
     </head>

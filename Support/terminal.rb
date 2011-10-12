@@ -70,7 +70,7 @@ module TextMate; module Terminal; class << self
           };
 
           ws.onclose = function() { vt.curs_set(0, false); };
-          ws.onopen = function() { vt.curs_set(1, true); };
+          ws.onopen = function() { vt.curs_set(1, true); vt.getch(getcha_); };
         });
       </script>
     </head>

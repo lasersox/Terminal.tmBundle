@@ -8,9 +8,6 @@ require ENV["TM_BUNDLE_SUPPORT"] + "/web_socket"
 require ENV["TM_SUPPORT_PATH"] + "/lib/escape"
 
 
-
-
-
 $KCODE = 'u' if RUBY_VERSION < "1.9"
 
 $stdin.sync = true
@@ -21,15 +18,11 @@ module TextMate; module Terminal; class << self
 
   def start_with(*args, &block)
 
-    io_serv = WebSocketServer.new(:accepted_domains => ["*"], :port => 8081)
+    io_serv = WebSocketServer.new(:accepted_domains => ["*"], :port => 0)
     port = io_serv.tcp_server.addr[1]
-    puts "Serving on port #{port}..."
 
-    if ENV.has_key?('TM_FILE_IS_UNTITLED')
-      `cp "$TM_FILEPATH" "${TM_FILEPATH}.x"`
-      ENV["TM_FILEPATH"] = ENV["TM_FILEPATH"] + ".x"
-    end
-
+    $stderr.write("serving on port #{port}")
+    
     if $stdout.tty?
       wait(io_serv, *args, &block)
     else
@@ -50,7 +43,7 @@ module TextMate; module Terminal; class << self
     <html>
     <head>
       <script src='http://ajax.googleapis.com/ajax/libs/jquery/1.3.2/jquery.min.js'></script>
-      <script src='file://#{e_url(ENV["TM_BUNDLE_SUPPORT"])}/ovt100.js'></script>
+      <script src='file://#{e_url(ENV["TM_BUNDLE_SUPPORT"])}/vt100.js'></script>
       <script type="text/javascript">
 
         var ws;
@@ -75,10 +68,10 @@ module TextMate; module Terminal; class << self
           vt.noecho();
           vt.curs_set(1, true);
 
-          // ws.onclose = function() {
-          //   $('#stdout').append("\\n\\nDONE\\n")
-          // };
-          // ws.onopen = function() { $('#stdout').append("\\nCONNECTED\\n") };
+          ws.onclose = function() {
+            vt.write("\\n\\n==DONE==\\n")
+          };
+          ws.onopen = function() { vt.write("\\n==CONNECTED==\\n") };
         });
       </script>
     </head>

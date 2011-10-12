@@ -54,28 +54,23 @@ module TextMate; module Terminal; class << self
         var vt;
         $(document).ready(function() {
 
-          ws = new WebSocket("ws://localhost:#{port}");          
           vt = new VT100(80,30,'term');
+          vt.noecho();
+
+          ws = new WebSocket("ws://localhost:#{port}");          
 
           getcha_ = function(ch, vt){
             ws.send(ch);
             vt.getch(getcha_);
           };
 
-          vt.getch(getcha_);
-
           ws.onmessage = function(evt) {
             vt.write(evt.data);
             return false;
           };
 
-          vt.noecho();
-          vt.curs_set(1, true);
-
-          ws.onclose = function() {
-            vt.write("\\n\\n==DONE==\\n")
-          };
-          ws.onopen = function() { vt.write("\\n==CONNECTED==\\n") };
+          ws.onclose = function() { vt.curs_set(0, false); };
+          ws.onopen = function() { vt.curs_set(1, true); };
         });
       </script>
     </head>

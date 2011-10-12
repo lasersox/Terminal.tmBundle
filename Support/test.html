@@ -1,0 +1,41 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <script src='http://ajax.googleapis.com/ajax/libs/jquery/1.3.2/jquery.min.js'></script>
+  <script src='vt100.js'></script>
+  <script type="text/javascript">
+
+    var ws;
+    var vt;
+    $(document).ready(function() {
+
+      ws = new WebSocket("ws://localhost:8081");          
+      vt = new VT100(80,30,'term');
+
+      getcha_ = function(ch, vt){
+        ws.send(ch);
+        vt.getch(getcha_)
+      };
+
+      vt.getch(getcha_);
+
+      ws.onmessage = function(evt) {
+        vt.write(evt.data);
+        return false;
+      };
+
+      vt.noecho();
+      vt.curs_set(1, true);
+
+      ws.onclose = function() {
+        vt.write("\n\nDONE\n")
+      };
+      ws.onopen = function() { vt.write("\nCONNECTED\n") };
+    });
+  </script>
+</head>
+<body style="background: black; color: white;">
+<pre id="term">
+</pre>
+</body>
+</html>

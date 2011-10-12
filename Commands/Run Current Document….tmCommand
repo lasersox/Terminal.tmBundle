@@ -10,10 +10,12 @@
 	<string>#!/usr/bin/env ruby -wKU
 
 require ENV['TM_BUNDLE_SUPPORT'] + '/terminal.rb'
-TextMate::Terminal.start_with(ENV['TM_EXEC'], ENV['TM_FILEPATH'])
+
+cmd = TextMate::Terminal.parse_hashbang($stdin.readline)
+TextMate::Terminal.start_with(cmd||ENV['TM_EXEC'], ENV['TM_FILEPATH'])
 </string>
 	<key>input</key>
-	<string>none</string>
+	<string>document</string>
 	<key>inputFormat</key>
 	<string>text</string>
 	<key>keyEquivalent</key>

@@ -16,6 +16,10 @@ $stdout.sync = true
 
 module TextMate; module Terminal; class << self
 
+  def parse_hashbang(str)
+    $1.chomp if /\A#!(.*)$/ =~ str
+  end
+
   def start_with(*args, &block)
 
     io_serv = WebSocketServer.new(:accepted_domains => ["*"], :port => 0)
